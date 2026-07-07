@@ -2,20 +2,13 @@
 # -*- coding: utf-8 -*-
 
 # Author: ErwanBCN / RONELABS
-# Version: 1.1.0
+# Version: 1.4.1
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="1.1.0" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="1.4.1" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V1.1.0</h2><br/>
-        Gestion automatique de 7 zones d'arrosage + 1 vanne générale.<br/>
-        <ul>
-            <li>Mode Off / Auto / Test</li>
-            <li>Départ automatique à l'heure Mode3</li>
-            <li>Durées par zone en Mode4</li>
-            <li>Mode Test: 1 minute par zone</li>
-            <li>Commande manuelle Zone 0 à 7, durée max 1 minute</li>
-        </ul>
+        <h2>Automatic Irrigation System V1.4.1</h2><br/>
+        Gestion automatique de 7 zones d'arrosage + 1 vanne générale.
     </description>
     <params>
         <param field="Mode1" label="General Valve idx (ou CSV si plusieurs)" width="260px" required="true" default=""/>
@@ -54,36 +47,60 @@ MODE_OFF = 0
 MODE_AUTO = 10
 MODE_TEST = 20
 
+USERVAR_LAST_MODE = "Irrigation_LastStableMode"
+
 
 class BasePlugin:
     def __init__(self):
         self.debug = False
+
         self.main_valve_idxs = []
         self.zone_idxs = []
         self.start_time = "05:00"
         self.zone_minutes = [5, 5, 10, 10, 8, 8, 5]
 
-        self.mode = MODE_AUTO
+        self.mode = MODE_OFF
         self.run_active = False
-        self.run_type = None       # "auto", "test" ou "manual"
-        self.current_zone = 0      # index 0..6 pour auto/test, ou zone 1..7 en manuel
+        self.run_type = None
+        self.current_zone = 0          # auto/test: index 0..6 ; manual: zone 1..7
         self.zone_end_time = None
         self.last_auto_date = None
+        self._device_state_cache = {}
 
     # ---------------------------------------------------------------------
-    # Domoticz lifecycle
+    # Lifecycle
     # ---------------------------------------------------------------------
 
     def onStart(self):
         Domoticz.Log("RONELABS Irrigation: onStart called")
+
         self._setup_debug()
         self._read_parameters()
         self._create_devices()
+
+        Domoticz.Heartbeat(20)
+
+        # Sécurité absolue au démarrage.
+        self._refresh_state_cache()
+        self._all_valves_off()
+
+        # UserVariable : check/création au démarrage.
+        self._ensure_last_mode_uservariable()
+
         self._restore_mode_from_device()
 
-        # Sécurité au démarrage: toutes les vannes fermées.
-        self._all_valves_off()
-        Domoticz.Heartbeat(5)
+        # Si Domoticz redémarre alors que le bouton était resté sur Test,
+        # on revient au dernier mode stable sauvegardé.
+        if self.mode == MODE_TEST:
+            last = self._read_last_stable_mode(default=MODE_OFF)
+            Domoticz.Log(f"Startup found Test mode. Restoring last stable mode: {last}")
+            self.mode = last
+            self._update_selector(UNIT_MODE, last)
+
+        # Le manuel est toujours remis à zéro au démarrage.
+        self._update_selector(UNIT_MANUAL_ZONE, 0)
+
+        Domoticz.Log(f"RONELABS Irrigation started. Current mode={self.mode}")
 
     def onStop(self):
         Domoticz.Log("RONELABS Irrigation: onStop called")
@@ -93,32 +110,40 @@ class BasePlugin:
     def onCommand(self, Unit, Command, Level, Color):
         Domoticz.Log(f"RONELABS Irrigation: onCommand Unit={Unit} Command={Command} Level={Level}")
 
+        self._ensure_last_mode_uservariable()
+
         if Unit == UNIT_MODE:
-            level = self._safe_level(Level, Devices[UNIT_MODE].sValue if UNIT_MODE in Devices else MODE_AUTO)
+            fallback = Devices[UNIT_MODE].sValue if UNIT_MODE in Devices else MODE_OFF
+            level = self._safe_level(Level, fallback)
             self._handle_mode_command(level)
             return
 
         if Unit == UNIT_MANUAL_ZONE:
-            level = self._safe_level(Level, Devices[UNIT_MANUAL_ZONE].sValue if UNIT_MANUAL_ZONE in Devices else 0)
+            fallback = Devices[UNIT_MANUAL_ZONE].sValue if UNIT_MANUAL_ZONE in Devices else 0
+            level = self._safe_level(Level, fallback)
             self._handle_manual_zone_command(level)
             return
 
     def onHeartbeat(self):
         now = datetime.now()
 
+        # Check/création UserVariable à chaque heartbeat.
+        self._ensure_last_mode_uservariable()
+
         if self.debug:
+            display_zone = self.current_zone + 1 if self.run_type in ("auto", "test") and self.run_active else self.current_zone
             Domoticz.Debug(
                 f"Heartbeat mode={self.mode} active={self.run_active} "
-                f"type={self.run_type} zone={self.current_zone} end={self.zone_end_time}"
+                f"type={self.run_type} zone={display_zone} end={self.zone_end_time}"
             )
 
-        # Lancement automatique une seule fois par date, à partir de l'heure Mode3.
-        if self.mode == MODE_AUTO and not self.run_active and self._time_reached(now):
-            if self.last_auto_date != now.date():
-                self.start_sequence("auto")
-                self.last_auto_date = now.date()
+        # Départ auto seulement dans la fenêtre de l'heure prévue.
+        if self.mode == MODE_AUTO and not self.run_active:
+            if self._time_window_reached(now):
+                if self.last_auto_date != now.date():
+                    self.start_sequence("auto")
+                    self.last_auto_date = now.date()
 
-        # Gestion non bloquante de la séquence en cours.
         if self.run_active and self.zone_end_time and now >= self.zone_end_time:
             if self.run_type in ("auto", "test"):
                 self._advance_sequence(now)
@@ -126,33 +151,44 @@ class BasePlugin:
                 self.stop_sequence(reset_manual_selector=True)
 
     # ---------------------------------------------------------------------
-    # Commands
+    # Mode commands
     # ---------------------------------------------------------------------
 
     def _handle_mode_command(self, level):
         if level not in (MODE_OFF, MODE_AUTO, MODE_TEST):
-            level = MODE_AUTO
+            level = MODE_OFF
 
-        self.mode = level
-        self._update_selector(UNIT_MODE, level)
+        previous_mode = self.mode
 
         if level == MODE_OFF:
+            self.mode = MODE_OFF
+            self._write_last_stable_mode(MODE_OFF)
+            self._update_selector(UNIT_MODE, MODE_OFF)
             self.stop_sequence(reset_manual_selector=True)
             Domoticz.Log("Irrigation mode: Off")
+            return
 
-        elif level == MODE_AUTO:
-            # Auto attend simplement la prochaine heure programmée.
+        if level == MODE_AUTO:
+            self.mode = MODE_AUTO
+            self._write_last_stable_mode(MODE_AUTO)
+            self._update_selector(UNIT_MODE, MODE_AUTO)
             if self.run_type == "test":
                 self.stop_sequence(reset_manual_selector=True)
             Domoticz.Log("Irrigation mode: Auto")
+            return
 
-        elif level == MODE_TEST:
-            # Test complet immédiat: 1 minute par zone.
+        if level == MODE_TEST:
+            # Mémorise le dernier mode stable seulement si précédent Off ou Auto.
+            if previous_mode in (MODE_OFF, MODE_AUTO):
+                self._write_last_stable_mode(previous_mode)
+
+            self.mode = MODE_TEST
+            self._update_selector(UNIT_MODE, MODE_TEST)
             Domoticz.Log("Irrigation mode: Test - starting 1 minute per zone")
             self.start_sequence("test")
+            return
 
     def _handle_manual_zone_command(self, level):
-        # Levels: 0=arrêt, 10=Zone1, 20=Zone2, ... 70=Zone7
         zone = int(level / 10) if level >= 10 else 0
 
         if zone < 0 or zone > 7:
@@ -164,7 +200,6 @@ class BasePlugin:
             self._update_selector(UNIT_MANUAL_ZONE, 0)
             return
 
-        # Une commande manuelle annule une séquence en cours pour éviter 2 zones ouvertes.
         if self.run_active:
             self.stop_sequence(reset_manual_selector=False)
 
@@ -178,14 +213,17 @@ class BasePlugin:
         if len(self.zone_idxs) != 7:
             Domoticz.Error("Cannot start irrigation: Mode2 must contain exactly 7 zone idx")
             return
+
         if not self.main_valve_idxs:
             Domoticz.Error("Cannot start irrigation: Mode1 general valve idx missing")
             return
 
         self.stop_sequence(reset_manual_selector=True, quiet=True)
+
         self.run_active = True
         self.run_type = run_type
         self.current_zone = 0
+
         self._start_current_zone(datetime.now())
 
     def start_manual_zone(self, zone):
@@ -201,6 +239,7 @@ class BasePlugin:
 
         self._open_only_zone(zone - 1)
         self._update_selector(UNIT_MANUAL_ZONE, zone * 10)
+
         Domoticz.Log(f"Manual irrigation: Zone {zone} On for max 1 minute")
 
     def _start_current_zone(self, now):
@@ -213,7 +252,9 @@ class BasePlugin:
             return
 
         self.zone_end_time = now + timedelta(minutes=duration)
+
         self._open_only_zone(self.current_zone)
+
         Domoticz.Log(
             f"Irrigation {self.run_type}: Zone {self.current_zone + 1} On "
             f"for {duration:g} minute(s)"
@@ -221,10 +262,20 @@ class BasePlugin:
 
     def _advance_sequence(self, now):
         self.current_zone += 1
+
         if self.current_zone >= 7:
+            finished_type = self.run_type
             self.stop_sequence(reset_manual_selector=True)
-            Domoticz.Log(f"Irrigation {self.run_type or ''}: sequence finished")
+
+            if finished_type == "test":
+                last = self._read_last_stable_mode(default=MODE_OFF)
+                self.mode = last
+                self._update_selector(UNIT_MODE, last)
+                Domoticz.Log(f"Test finished. Restored previous mode: {last}")
+            else:
+                Domoticz.Log(f"Irrigation {finished_type or ''}: sequence finished")
             return
+
         self._start_current_zone(now)
 
     def stop_sequence(self, reset_manual_selector=True, quiet=False):
@@ -232,9 +283,12 @@ class BasePlugin:
         self.run_type = None
         self.current_zone = 0
         self.zone_end_time = None
+
         self._all_valves_off()
+
         if reset_manual_selector:
             self._update_selector(UNIT_MANUAL_ZONE, 0)
+
         if not quiet:
             Domoticz.Log("Irrigation stopped: all valves Off")
 
@@ -243,31 +297,184 @@ class BasePlugin:
     # ---------------------------------------------------------------------
 
     def _open_only_zone(self, zone_index):
-        # Ordre volontaire: fermer les zones, ouvrir générale, puis ouvrir zone.
-        for idx in self.zone_idxs:
-            self._switch_idx(idx, "Off")
+        """
+        Anti-clignotement pompe :
+        - on garde la vanne générale ON si elle est déjà ON
+        - on ouvre la nouvelle zone
+        - puis on ferme les autres zones
+        """
+        self._refresh_state_cache()
 
         for idx in self.main_valve_idxs:
-            self._switch_idx(idx, "On")
+            self._switch_idx_if_needed(idx, "On")
 
-        self._switch_idx(self.zone_idxs[zone_index], "On")
+        target_idx = self.zone_idxs[zone_index]
+        self._switch_idx_if_needed(target_idx, "On")
+
+        for idx in self.zone_idxs:
+            if idx != target_idx:
+                self._switch_idx_if_needed(idx, "Off")
 
     def _all_valves_off(self):
-        for idx in self.zone_idxs:
-            self._switch_idx(idx, "Off")
-        for idx in self.main_valve_idxs:
-            self._switch_idx(idx, "Off")
+        self._refresh_state_cache()
 
-    def _switch_idx(self, idx, command):
+        for idx in self.zone_idxs:
+            self._switch_idx_if_needed(idx, "Off")
+
+        for idx in self.main_valve_idxs:
+            self._switch_idx_if_needed(idx, "Off")
+
+    def _switch_idx_if_needed(self, idx, command):
         if not idx:
             return False
+
+        current = self._get_switch_state(idx)
+
+        if current == command:
+            if self.debug:
+                Domoticz.Debug(f"Valve idx={idx} already {command}, no command sent")
+            return True
+
         res = DomoticzAPI(f"type=command&param=switchlight&idx={idx}&switchcmd={command}")
+
         if not res or str(res.get("status", "")).lower() != "ok":
             Domoticz.Error(f"Valve command failure idx={idx} command={command}")
             return False
+
+        self._device_state_cache[idx] = command
+
         if self.debug:
             Domoticz.Debug(f"Valve idx={idx} => {command}")
+
         return True
+
+    def _refresh_state_cache(self):
+        self._device_state_cache = {}
+
+        all_idxs = list(set(self.zone_idxs + self.main_valve_idxs))
+
+        for idx in all_idxs:
+            state = self._read_switch_state_from_domoticz(idx)
+            if state in ("On", "Off"):
+                self._device_state_cache[idx] = state
+
+    def _get_switch_state(self, idx):
+        if idx in self._device_state_cache:
+            return self._device_state_cache[idx]
+
+        state = self._read_switch_state_from_domoticz(idx)
+
+        if state in ("On", "Off"):
+            self._device_state_cache[idx] = state
+
+        return state
+
+    def _read_switch_state_from_domoticz(self, idx):
+        res = DomoticzAPI(f"type=command&param=getdevices&rid={idx}")
+
+        try:
+            dev = res["result"][0]
+        except Exception:
+            return None
+
+        status = str(dev.get("Status", "")).strip()
+        data = str(dev.get("Data", "")).strip()
+
+        if status in ("On", "Off"):
+            return status
+
+        if data in ("On", "Off"):
+            return data
+
+        try:
+            nvalue = int(dev.get("nValue", 0))
+            return "On" if nvalue == 1 else "Off"
+        except Exception:
+            return None
+
+    # ---------------------------------------------------------------------
+    # UserVariable helpers
+    # ---------------------------------------------------------------------
+
+    def _ensure_last_mode_uservariable(self):
+        existing = self._get_uservariable(USERVAR_LAST_MODE)
+
+        if existing is not None:
+            if self.debug:
+                Domoticz.Debug(f"UserVariable OK: {USERVAR_LAST_MODE}={existing}")
+            return True
+
+        Domoticz.Log(f"UserVariable missing: creating {USERVAR_LAST_MODE}=0")
+
+        # Type 2 = String, comme WANCONTROL.
+        res = DomoticzAPI(
+            f"type=command&param=adduservariable"
+            f"&vname={USERVAR_LAST_MODE}"
+            f"&vtype=2"
+            f"&vvalue=0"
+        )
+
+        if not res:
+            Domoticz.Error(f"Failed to create UserVariable {USERVAR_LAST_MODE}: no API response")
+            return False
+
+        Domoticz.Log(f"Create UserVariable response: {res}")
+
+        check = self._get_uservariable(USERVAR_LAST_MODE)
+
+        if check is None:
+            Domoticz.Error(f"UserVariable {USERVAR_LAST_MODE} still missing after creation")
+            return False
+
+        Domoticz.Log(f"Created UserVariable OK: {USERVAR_LAST_MODE}={check}")
+        return True
+
+    def _get_uservariable(self, name):
+        res = DomoticzAPI("type=command&param=getuservariables")
+
+        if not res:
+            return None
+
+        result = res.get("result", [])
+
+        for item in result:
+            if str(item.get("Name", "")) == name:
+                return str(item.get("Value", ""))
+
+        return None
+
+    def _write_last_stable_mode(self, mode):
+        if mode not in (MODE_OFF, MODE_AUTO):
+            mode = MODE_OFF
+
+        self._ensure_last_mode_uservariable()
+
+        res = DomoticzAPI(
+            f"type=command&param=updateuservariable"
+            f"&vname={USERVAR_LAST_MODE}"
+            f"&vtype=2"
+            f"&vvalue={mode}"
+        )
+
+        if not res:
+            Domoticz.Error(f"Failed to update UserVariable {USERVAR_LAST_MODE}={mode}")
+            return False
+
+        Domoticz.Log(f"UserVariable updated: {USERVAR_LAST_MODE}={mode}")
+        return True
+
+    def _read_last_stable_mode(self, default=MODE_OFF):
+        value = self._get_uservariable(USERVAR_LAST_MODE)
+
+        try:
+            mode = int(value)
+        except Exception:
+            mode = default
+
+        if mode not in (MODE_OFF, MODE_AUTO):
+            mode = default
+
+        return mode
 
     # ---------------------------------------------------------------------
     # Setup helpers
@@ -281,6 +488,7 @@ class BasePlugin:
 
         self.debug = debuglevel != 0
         Domoticz.Debugging(debuglevel if self.debug else 0)
+
         if self.debug:
             DumpConfigToLog()
 
@@ -292,9 +500,11 @@ class BasePlugin:
 
         if len(self.zone_idxs) != 7:
             Domoticz.Error("Mode2 error: expected exactly 7 comma-separated idx values")
+
         if len(self.zone_minutes) != 7:
             Domoticz.Error("Mode4 error: expected exactly 7 comma-separated minute values. Default used.")
             self.zone_minutes = [5, 5, 10, 10, 8, 8, 5]
+
         if not self._valid_time(self.start_time):
             Domoticz.Error(f"Mode3 error: invalid starting hour '{self.start_time}'. Default 05:00 used.")
             self.start_time = "05:00"
@@ -339,26 +549,37 @@ class BasePlugin:
                 Used=1,
             ).Create()
 
-        self._update_selector(UNIT_MODE, MODE_AUTO)
-        self._update_selector(UNIT_MANUAL_ZONE, 0)
+        # Ne jamais forcer Auto ici.
+        if UNIT_MANUAL_ZONE in Devices:
+            self._update_selector(UNIT_MANUAL_ZONE, 0)
 
     def _restore_mode_from_device(self):
         try:
             saved = int(Devices[UNIT_MODE].sValue)
         except Exception:
-            saved = MODE_AUTO
+            saved = MODE_OFF
+
         if saved not in (MODE_OFF, MODE_AUTO, MODE_TEST):
-            saved = MODE_AUTO
+            saved = MODE_OFF
+
         self.mode = saved
 
     # ---------------------------------------------------------------------
     # Generic helpers
     # ---------------------------------------------------------------------
 
-    def _time_reached(self, now):
-        hour, minute = [int(x) for x in self.start_time.split(":")]
-        scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        return now >= scheduled
+    def _time_window_reached(self, now):
+        """
+        Départ seulement dans une fenêtre de 60 secondes après l'heure prévue.
+        Évite qu'un reboot à 13h déclenche le cycle de 05h.
+        """
+        try:
+            hour, minute = [int(x) for x in self.start_time.split(":")]
+            scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            delta = (now - scheduled).total_seconds()
+            return 0 <= delta < 60
+        except Exception:
+            return False
 
     def _valid_time(self, value):
         try:
@@ -379,8 +600,10 @@ class BasePlugin:
     def _update_selector(self, unit, level):
         if unit not in Devices:
             return
+
         nvalue = 0 if int(level) == 0 else 1
         svalue = str(int(level))
+
         if Devices[unit].nValue != nvalue or Devices[unit].sValue != svalue:
             Devices[unit].Update(nValue=nvalue, sValue=svalue)
 
@@ -388,17 +611,20 @@ class BasePlugin:
 def DomoticzAPI(APICall):
     resultJson = None
     url = f"http://127.0.0.1:8080/json.htm?{parse.quote(APICall, safe='&=')}"
+
     try:
         Domoticz.Debug(f"Domoticz API request: {url}")
         req = request.Request(url)
         response = request.urlopen(req, timeout=10)
+
         if response.status == 200:
             resultJson = json.loads(response.read().decode("utf-8"))
             if resultJson.get("status") == "ERR":
-                Domoticz.Error(f"Domoticz API returned ERR for {APICall}")
-                resultJson = None
+                Domoticz.Error(f"Domoticz API returned ERR for {APICall}: {resultJson}")
+                return None
         else:
             Domoticz.Error(f"Domoticz API HTTP error = {response.status}")
+
     except urllib.error.HTTPError as e:
         Domoticz.Error(f"HTTP error calling '{url}': {e}")
     except urllib.error.URLError as e:
@@ -407,32 +633,41 @@ def DomoticzAPI(APICall):
         Domoticz.Error(f"JSON decoding error: {e}")
     except Exception as e:
         Domoticz.Error(f"Error calling '{url}': {e}")
+
     return resultJson
 
 
 def parseCSV_to_ints(s):
     out = []
+
     for x in str(s).split(","):
         x = x.strip()
+
         if not x:
             continue
+
         try:
             out.append(int(x))
         except Exception:
             Domoticz.Error(f"Invalid integer in CSV: {x}")
+
     return out
 
 
 def parseCSV_to_floats(s):
     out = []
+
     for x in str(s).split(","):
         x = x.strip()
+
         if not x:
             continue
+
         try:
             out.append(float(x))
         except Exception:
             Domoticz.Error(f"Invalid number in CSV: {x}")
+
     return out
 
 
@@ -440,7 +675,9 @@ def DumpConfigToLog():
     for x in Parameters:
         if Parameters[x] != "":
             Domoticz.Debug("'" + x + "':'" + str(Parameters[x]) + "'")
+
     Domoticz.Debug("Device count: " + str(len(Devices)))
+
     for x in Devices:
         Domoticz.Debug("Device:       " + str(x) + " - " + str(Devices[x]))
         Domoticz.Debug("Device ID:    '" + str(Devices[x].ID) + "'")
@@ -450,7 +687,6 @@ def DumpConfigToLog():
         Domoticz.Debug("LastLevel:    " + str(Devices[x].LastLevel))
 
 
-# Glue - Plugin functions
 _global_plugin = BasePlugin()
 
 
