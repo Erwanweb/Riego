@@ -332,28 +332,28 @@ class BasePlugin:
     # ---------------------------------------------------------------------
 
     def _open_only_zone(self, zone_index):
-    """
-    Anti-clignotement pompe :
-    - ouvrir/laisser ouverte la vanne générale
-    - ouvrir la nouvelle zone
-    - fermer les autres zones après
-    - ne jamais couper la générale entre 2 zones
-    """
-    self._refresh_state_cache()
-
-    target_idx = self.zone_idxs[zone_index]
-
-    # 1. La générale reste ON
-    for idx in self.main_valve_idxs:
-        self._switch_idx_if_needed(idx, "On")
-
-    # 2. Ouvrir la nouvelle zone
-    self._switch_idx_if_needed(target_idx, "On")
-
-    # 3. Fermer les autres zones seulement après
-    for idx in self.zone_idxs:
-        if idx != target_idx:
-            self._switch_idx_if_needed(idx, "Off")
+        """
+        Anti-clignotement pompe :
+        - ouvrir/laisser ouverte la vanne générale
+        - ouvrir la nouvelle zone
+        - fermer les autres zones après
+        - ne jamais couper la générale entre 2 zones
+        """
+        self._refresh_state_cache()
+    
+        target_idx = self.zone_idxs[zone_index]
+    
+        # 1. La générale reste ON
+        for idx in self.main_valve_idxs:
+            self._switch_idx_if_needed(idx, "On")
+    
+        # 2. Ouvrir la nouvelle zone
+        self._switch_idx_if_needed(target_idx, "On")
+    
+        # 3. Fermer les autres zones seulement après
+        for idx in self.zone_idxs:
+            if idx != target_idx:
+                self._switch_idx_if_needed(idx, "Off")
 
     def _all_valves_off(self):
         self._refresh_state_cache()
