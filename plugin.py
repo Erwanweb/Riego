@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 # Author: ErwanBCN / RONELABS
-# Version: 2.0.0
+# Version: 2.0.1
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.0.0" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.0.1" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V2.0.0</h2><br/>
+        <h2>Automatic Irrigation System V2.0.1</h2><br/>
         Gestion automatique de 7 zones d'arrosage + 1 vanne générale.<br/>
         V2 nettoyée : démarrage sécurisé Zigbee, Auto/Test/Manuel, Info texte, UserVariable.
     </description>
@@ -29,6 +29,7 @@
 """
 
 import json
+import threading
 import urllib.error
 import urllib.parse as parse
 import urllib.request as request
@@ -144,6 +145,7 @@ class BasePlugin:
                 Domoticz.Log("Manual selector ignored during startup safety phase")
                 self._force_all_valves_off(reason="startup manual ignored")
                 self._set_manual_selector_stop()
+                self._delayed_set_manual_selector_stop()
                 self._update_info()
                 return
 
@@ -154,8 +156,8 @@ class BasePlugin:
 
             if current_mode != MODE_MANUAL:
                 Domoticz.Log("Manual selector ignored because Control is not Manual")
-                self._all_valves_off()
                 self._set_manual_selector_stop()
+                self._delayed_set_manual_selector_stop()
                 self._update_info()
                 return
 
@@ -771,6 +773,25 @@ class BasePlugin:
 
     def _set_manual_selector_stop(self):
         self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
+
+    def _delayed_set_manual_selector_stop(self, delay=1.5):
+        """
+        Domoticz réapplique la valeur cliquée sur un Selector Switch juste après
+        le retour de onCommand, ce qui écrase l'Update() fait pendant onCommand.
+        On reforce donc "Stop" un court instant plus tard, une fois que Domoticz
+        a fini d'appliquer sa propre valeur, pour que le bouton reste bloqué sur Stop.
+        """
+        def _do():
+            try:
+                self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
+                if self.debug:
+                    Domoticz.Debug("Manual selector force-reset to Stop (delayed)")
+            except Exception as e:
+                Domoticz.Error(f"Delayed manual selector reset failed: {e}")
+
+        timer = threading.Timer(delay, _do)
+        timer.daemon = True
+        timer.start()
 
     def _time_window_reached(self, now):
         try:
