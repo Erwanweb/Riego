@@ -112,10 +112,17 @@ class BasePlugin:
             return
 
         if Unit == UNIT_MANUAL_ZONE:
+            # Le sélecteur manuel n'est utilisable que si le mode est Manuel.
+            if self.mode != MODE_MANUAL:
+                Domoticz.Log("Manual selector ignored (mode is not Manual)")
+                self._set_manual_selector_idle()     # remet immédiatement sur Off caché
+                return
+        
             fallback = Devices[UNIT_MANUAL_ZONE].sValue if UNIT_MANUAL_ZONE in Devices else MANUAL_HIDDEN_OFF
             level = self._safe_level(Level, fallback)
             self._handle_manual_zone_command(level)
             return
+
 
     def onHeartbeat(self):
         now = datetime.now()
@@ -128,6 +135,9 @@ class BasePlugin:
                 f"type={self.run_type} zone={display_zone} end={self.zone_end_time}"
             )
 
+        if self.mode != MODE_MANUAL:
+            self._set_manual_selector_idle()
+        
         if self.mode == MODE_AUTO and not self.run_active:
             if self._time_window_reached(now) and self.last_auto_date != now.date():
                 self.start_sequence("auto")
