@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 # Author: ErwanBCN / RONELABS
-# Version: 2.1.2
+# Version: 2.1.3
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.1.2" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.1.3" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V2.1.2</h2><br/>
+        <h2>Automatic Irrigation System V2.1.3</h2><br/>
         Gestion automatique de 7 zones d'arrosage + 1 vanne générale.<br/>
         V2 nettoyée : démarrage sécurisé Zigbee, Auto/Test/Manual, Info texte, UserVariable.
     </description>
@@ -30,6 +30,7 @@
 
 import json
 import threading
+import concurrent.futures
 import urllib.error
 import urllib.parse as parse
 import urllib.request as request
@@ -88,7 +89,7 @@ class BasePlugin:
         self._device_state_cache = {}
 
     def onStart(self):
-        Domoticz.Log("RONELABS Irrigation V2.1.2: onStart called")
+        Domoticz.Log("RONELABS Irrigation V2.1.3: onStart called")
 
         self._setup_debug()
         self._read_parameters()
@@ -450,30 +451,60 @@ class BasePlugin:
             self._switch_idx_if_needed(idx, "Off")
 
     def _force_all_valves_off(self, reason="force off"):
-        for idx in self.zone_idxs:
-            self._switch_idx_force(idx, "Off", reason)
+        """
+        Envoie les commandes Off à toutes les vannes (zones + vanne générale)
+        en parallèle (Domoticz n'a pas d'endpoint "off groupé" pour une liste
+        d'idx arbitraire), et logue un seul résumé au lieu d'une ligne par vanne.
+        """
+        all_idxs = [idx for idx in (self.zone_idxs + self.main_valve_idxs) if idx]
 
-        for idx in self.main_valve_idxs:
-            self._switch_idx_force(idx, "Off", reason)
+        if not all_idxs:
+            return
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_idxs)) as executor:
+            future_to_idx = {
+                executor.submit(self._send_valve_command, idx, "Off"): idx
+                for idx in all_idxs
+            }
+            results = {}
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    results[idx] = False
+                    Domoticz.Error(f"{reason}: exception forcing valve idx={idx} Off: {e}")
+
+        ok_idxs = [idx for idx in all_idxs if results.get(idx)]
+        failed_idxs = [idx for idx in all_idxs if not results.get(idx)]
+
+        if ok_idxs:
+            Domoticz.Log(f"{reason}: valves forced Off (parallel) idx={ok_idxs}")
+
+        if failed_idxs:
+            Domoticz.Error(f"{reason}: failed to force Off idx={failed_idxs}")
 
     def _mark_all_valves_cached_off(self):
         for idx in self.zone_idxs + self.main_valve_idxs:
             if idx:
                 self._device_state_cache[idx] = "Off"
 
-    def _switch_idx_force(self, idx, command, reason="force"):
+    def _send_valve_command(self, idx, command):
+        """
+        Envoie une commande switchlight pour un idx donné (exécuté potentiellement
+        dans un thread worker). Ne fait AUCUN appel Domoticz.Log/Error ici pour
+        garder toute la journalisation dans le thread principal de l'appelant.
+        """
         if not idx:
             return False
 
         res = DomoticzAPI(f"type=command&param=switchlight&idx={idx}&switchcmd={command}")
+        ok = bool(res) and str(res.get("status", "")).lower() == "ok"
 
-        if not res or str(res.get("status", "")).lower() != "ok":
-            Domoticz.Error(f"Force valve command failure idx={idx} command={command} reason={reason}")
-            return False
+        if ok:
+            self._device_state_cache[idx] = command
 
-        self._device_state_cache[idx] = command
-        Domoticz.Log(f"{reason}: valve idx={idx} forced {command}")
-        return True
+        return ok
 
     def _switch_idx_if_needed(self, idx, command):
         if not idx:
