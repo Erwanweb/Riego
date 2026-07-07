@@ -230,39 +230,49 @@ class BasePlugin:
         if self.mode != MODE_MANUAL:
             self._set_manual_selector_idle()
             return
-
-        manual_level_to_zone_index = {
-            20: 0,  # Zone 1
-            30: 1,  # Zone 2
-            40: 2,  # Zone 3
-            50: 3,  # Zone 4
-            60: 4,  # Zone 5
-            70: 5,  # Zone 6
-            80: 6,  # Zone 7
-        }
-
-        if level <= MANUAL_STOP_LEVEL:
+    
+        # Niveau 0 = Off caché
+        # Niveau 10 = Stop visible
+        # Même action : couper zones + vanne générale
+        if level in (MANUAL_HIDDEN_OFF, MANUAL_STOP_LEVEL):
             if self.run_type == "manual":
                 self.stop_sequence(reset_manual_selector=False)
-
+            else:
+                self._all_valves_off()
+    
             self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL, force=True)
             self._restore_last_stable_mode()
             return
-
+    
+        # Zones :
+        # Zone 1 = niveau 20
+        # Zone 2 = niveau 30
+        # ...
+        # Zone 7 = niveau 80
+        manual_level_to_zone_index = {
+            20: 0,
+            30: 1,
+            40: 2,
+            50: 3,
+            60: 4,
+            70: 5,
+            80: 6,
+        }
+    
         if level not in manual_level_to_zone_index:
             Domoticz.Error(f"Invalid manual selector level: {level}")
             self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL, force=True)
             return
-
+    
         zone_index = manual_level_to_zone_index[level]
         zone_number = zone_index + 1
-
+    
         if self.run_active:
             self._close_zones_only()
-
+    
         self.manual_mode_deadline = None
         self.start_manual_zone(zone_index, zone_number)
-
+    
     def start_sequence(self, run_type):
         if len(self.zone_idxs) != 7:
             Domoticz.Error("Cannot start irrigation: Mode2 must contain exactly 7 zone idx")
