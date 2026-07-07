@@ -245,17 +245,22 @@ class BasePlugin:
         if len(self.zone_idxs) != 7:
             Domoticz.Error("Cannot start irrigation: Mode2 must contain exactly 7 zone idx")
             return
-
+    
         if not self.main_valve_idxs:
             Domoticz.Error("Cannot start irrigation: Mode1 general valve idx missing")
             return
-
-        self.stop_sequence(reset_manual_selector=True, quiet=True)
-
+    
+        # Ne pas appeler stop_sequence ici, sinon la vanne générale clignote.
         self.run_active = True
         self.run_type = run_type
         self.current_zone = 0
-
+        self.zone_end_time = None
+    
+        # Sécurité : fermer seulement les zones, pas la générale.
+        self._refresh_state_cache()
+        for idx in self.zone_idxs:
+            self._switch_idx_if_needed(idx, "Off")
+    
         self._start_current_zone(datetime.now())
 
     def start_manual_zone(self, zone):
@@ -327,17 +332,28 @@ class BasePlugin:
     # ---------------------------------------------------------------------
 
     def _open_only_zone(self, zone_index):
-        self._refresh_state_cache()
+    """
+    Anti-clignotement pompe :
+    - ouvrir/laisser ouverte la vanne générale
+    - ouvrir la nouvelle zone
+    - fermer les autres zones après
+    - ne jamais couper la générale entre 2 zones
+    """
+    self._refresh_state_cache()
 
-        for idx in self.main_valve_idxs:
-            self._switch_idx_if_needed(idx, "On")
+    target_idx = self.zone_idxs[zone_index]
 
-        target_idx = self.zone_idxs[zone_index]
-        self._switch_idx_if_needed(target_idx, "On")
+    # 1. La générale reste ON
+    for idx in self.main_valve_idxs:
+        self._switch_idx_if_needed(idx, "On")
 
-        for idx in self.zone_idxs:
-            if idx != target_idx:
-                self._switch_idx_if_needed(idx, "Off")
+    # 2. Ouvrir la nouvelle zone
+    self._switch_idx_if_needed(target_idx, "On")
+
+    # 3. Fermer les autres zones seulement après
+    for idx in self.zone_idxs:
+        if idx != target_idx:
+            self._switch_idx_if_needed(idx, "Off")
 
     def _all_valves_off(self):
         self._refresh_state_cache()
