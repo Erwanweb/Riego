@@ -137,7 +137,8 @@ class BasePlugin:
         self._ensure_last_mode_uservariable()
 
         if self.mode != MODE_MANUAL:
-            self._set_manual_selector_idle()
+            if UNIT_MANUAL_ZONE in Devices and Devices[UNIT_MANUAL_ZONE].sValue != str(MANUAL_HIDDEN_OFF):
+                self._set_manual_selector_idle()
         
         if self.debug:
             display_zone = self.current_zone + 1 if self.run_type in ("auto", "test") and self.run_active else self.current_zone
@@ -627,33 +628,19 @@ class BasePlugin:
         Domoticz.Log(f"Restored previous stable mode: {last}")
 
     def _set_manual_selector_idle(self):
-        if UNIT_MANUAL_ZONE not in Devices:
-            return
+        self._update_selector(UNIT_MANUAL_ZONE, MANUAL_HIDDEN_OFF)
     
-        Devices[UNIT_MANUAL_ZONE].Update(
-            nValue=0,
-            sValue=str(MANUAL_HIDDEN_OFF)
-        )
+        def _setup_debug(self):
+            try:
+                debuglevel = int(Parameters.get("Mode6", "0"))
+            except Exception:
+                debuglevel = 0
     
-        # Force supplémentaire pour corriger l'affichage du menu déroulant
-        DomoticzAPI(
-            f"type=command&param=switchlight"
-            f"&idx={Devices[UNIT_MANUAL_ZONE].ID}"
-            f"&switchcmd=Set Level"
-            f"&level={MANUAL_HIDDEN_OFF}"
-        )
-
-    def _setup_debug(self):
-        try:
-            debuglevel = int(Parameters.get("Mode6", "0"))
-        except Exception:
-            debuglevel = 0
-
-        self.debug = debuglevel != 0
-        Domoticz.Debugging(debuglevel if self.debug else 0)
-
-        if self.debug:
-            DumpConfigToLog()
+            self.debug = debuglevel != 0
+            Domoticz.Debugging(debuglevel if self.debug else 0)
+    
+            if self.debug:
+                DumpConfigToLog()
 
     def _read_parameters(self):
         self.main_valve_idxs = parseCSV_to_ints(Parameters.get("Mode1", ""))
