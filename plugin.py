@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 # Author: ErwanBCN / RONELABS
-# Version: 2.2.0
+# Version: 2.2.2
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.2.0" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.2.2" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V2.2.0</h2><br/>
+        <h2>Automatic Irrigation System V2.2.2</h2><br/>
         Gestion automatique de 7 zones d'arrosage + 1 vanne générale.<br/>
         V2.2 : bouton unique Off/Auto/Test/Manual - Zone 1..7 (plus de second device manuel), démarrage sécurisé Zigbee, Info texte, UserVariable.
     </description>
@@ -87,7 +87,7 @@ class BasePlugin:
         self._device_state_cache = {}
 
     def onStart(self):
-        Domoticz.Log("RONELABS Irrigation V2.2.0: onStart called")
+        Domoticz.Log("RONELABS Irrigation V2.2.2: onStart called")
 
         self._setup_debug()
         self._read_parameters()
@@ -477,8 +477,8 @@ class BasePlugin:
         now = datetime.now()
 
         if self.startup_phase:
-            remaining = self._remaining_minutes(self.startup_end, now)
-            text = f"STARTUP SAFETY - forcing all valves Off - Rem. {remaining} min"
+            remaining = self._format_minutes_label(self._remaining_minutes(self.startup_end, now))
+            text = f"STARTUP SAFETY - forcing all valves Off - ⏱️ {remaining}"
 
         elif self.mode == MODE_OFF:
             text = "OFF"
@@ -487,10 +487,14 @@ class BasePlugin:
             text = f"AUTO - Next cycle at {self.start_time}"
 
         elif self.run_active:
-            rem_zone = self._remaining_minutes(self.zone_end_time, now)
-            rem_total = self._remaining_total_minutes(now)
+            rem_zone = self._format_minutes_label(self._remaining_minutes(self.zone_end_time, now))
             prefix = str(self.run_type).upper()
-            text = f"{prefix} - ON Zone {self.current_zone} - Rem. {rem_zone} min - Total Rem. {rem_total} min"
+
+            if self.run_type == "manual":
+                text = f"{prefix} - ON Zone {self.current_zone} - ⏱️ {rem_zone}"
+            else:
+                rem_total = self._format_minutes_label(self._remaining_total_minutes(now))
+                text = f"{prefix} - ON Zone {self.current_zone} - ⏱️ {rem_zone} - Total ⏱️ {rem_total}"
 
         elif self.mode == MODE_TEST:
             text = "TEST - Waiting"
@@ -503,6 +507,11 @@ class BasePlugin:
             text = "UNKNOWN"
 
         self._update_text(UNIT_INFO, text)
+
+    def _format_minutes_label(self, minutes):
+        if minutes <= 0:
+            return "<1 min"
+        return f"{minutes} min"
 
     def _remaining_minutes(self, end_time, now=None):
         if not end_time:
