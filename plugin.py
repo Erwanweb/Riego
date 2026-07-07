@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 # Author: ErwanBCN / RONELABS
-# Version: 2.1.1
+# Version: 2.1.2
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.1.1" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.1.2" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V2.1.1</h2><br/>
+        <h2>Automatic Irrigation System V2.1.2</h2><br/>
         Gestion automatique de 7 zones d'arrosage + 1 vanne générale.<br/>
         V2 nettoyée : démarrage sécurisé Zigbee, Auto/Test/Manual, Info texte, UserVariable.
     </description>
@@ -88,7 +88,7 @@ class BasePlugin:
         self._device_state_cache = {}
 
     def onStart(self):
-        Domoticz.Log("RONELABS Irrigation V2.1.1: onStart called")
+        Domoticz.Log("RONELABS Irrigation V2.1.2: onStart called")
 
         self._setup_debug()
         self._read_parameters()
