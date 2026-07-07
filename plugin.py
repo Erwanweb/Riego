@@ -137,9 +137,8 @@ class BasePlugin:
         self._ensure_last_mode_uservariable()
 
         if self.mode != MODE_MANUAL:
-            if UNIT_MANUAL_ZONE in Devices and Devices[UNIT_MANUAL_ZONE].sValue != str(MANUAL_HIDDEN_OFF):
-                self._set_manual_selector_idle()
-
+            self._set_manual_selector_idle()
+        
         if self.debug:
             display_zone = self.current_zone + 1 if self.run_type in ("auto", "test") and self.run_active else self.current_zone
             Domoticz.Debug(
@@ -225,33 +224,26 @@ class BasePlugin:
         if self.mode != MODE_MANUAL:
             self._set_manual_selector_idle()
             return
-
+    
         if level <= MANUAL_STOP_LEVEL:
             if self.run_type == "manual":
                 self.stop_sequence(reset_manual_selector=False)
-
             self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
             self._restore_last_stable_mode()
             return
-
-        # Off caché = 0
-        # Stop = 10
-        # Zone 1 = 20
-        # Zone 2 = 30
-        # ...
-        # Zone 7 = 80
-        zone = int(level / 10) - 1  # zone utilisateur 1..7
-
-        if zone < 1 or zone > 7:
+    
+        # Stop=10, Zone1=20, Zone2=30 ... Zone7=80
+        zone_number = int(level / 10) - 1  # donne bien 1..7
+    
+        if zone_number < 1 or zone_number > 7:
             self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
             return
-
+    
         if self.run_active:
-            # Ne coupe pas la vanne générale.
             self._close_zones_only()
-
+    
         self.manual_mode_deadline = None
-        self.start_manual_zone(zone)
+        self.start_manual_zone(zone_number)
 
     def start_sequence(self, run_type):
         if len(self.zone_idxs) != 7:
@@ -277,25 +269,26 @@ class BasePlugin:
         self._start_current_zone(datetime.now())
         self._update_info()
 
-    def start_manual_zone(self, zone):
-        # zone = numéro utilisateur 1..7
-        if zone < 1 or zone > 7 or len(self.zone_idxs) != 7:
-            Domoticz.Error(f"Invalid manual zone: {zone}")
+    def start_manual_zone(self, zone_number):
+        # zone_number = numéro affiché utilisateur 1..7
+        if zone_number < 1 or zone_number > 7 or len(self.zone_idxs) != 7:
+            Domoticz.Error(f"Invalid manual zone: {zone_number}")
             self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
             return
-
+    
+        zone_index = zone_number - 1  # index Python 0..6
+    
         self.run_active = True
         self.run_type = "manual"
-        self.current_zone = zone
+        self.current_zone = zone_number
         self.zone_end_time = datetime.now() + timedelta(minutes=1)
-
-        # zone - 1 = index Python 0..6
-        self._open_only_zone(zone - 1)
-
-        # Stop=10, Zone1=20
-        self._update_selector(UNIT_MANUAL_ZONE, (zone + 1) * 10)
-
-        Domoticz.Log(f"Manual irrigation: Zone {zone} On for max 1 minute")
+    
+        self._open_only_zone(zone_index)
+    
+        # Stop=10, Zone1=20, Zone2=30...
+        self._update_selector(UNIT_MANUAL_ZONE, (zone_number + 1) * 10)
+    
+        Domoticz.Log(f"Manual irrigation: Zone {zone_number} On for max 1 minute")
         self._update_info()
 
     def _start_current_zone(self, now):
@@ -634,7 +627,21 @@ class BasePlugin:
         Domoticz.Log(f"Restored previous stable mode: {last}")
 
     def _set_manual_selector_idle(self):
-        self._update_selector(UNIT_MANUAL_ZONE, MANUAL_HIDDEN_OFF)
+        if UNIT_MANUAL_ZONE not in Devices:
+            return
+    
+        Devices[UNIT_MANUAL_ZONE].Update(
+            nValue=0,
+            sValue=str(MANUAL_HIDDEN_OFF)
+        )
+    
+        # Force supplémentaire pour corriger l'affichage du menu déroulant
+        DomoticzAPI(
+            f"type=command&param=switchlight"
+            f"&idx={Devices[UNIT_MANUAL_ZONE].ID}"
+            f"&switchcmd=Set Level"
+            f"&level={MANUAL_HIDDEN_OFF}"
+        )
 
     def _setup_debug(self):
         try:
