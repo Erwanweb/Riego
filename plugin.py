@@ -630,17 +630,17 @@ class BasePlugin:
     def _set_manual_selector_idle(self):
         self._update_selector(UNIT_MANUAL_ZONE, MANUAL_HIDDEN_OFF)
     
-        def _setup_debug(self):
-            try:
-                debuglevel = int(Parameters.get("Mode6", "0"))
-            except Exception:
-                debuglevel = 0
+    def _setup_debug(self):
+        try:
+            debuglevel = int(Parameters.get("Mode6", "0"))
+        except Exception:
+            debuglevel = 0
     
-            self.debug = debuglevel != 0
-            Domoticz.Debugging(debuglevel if self.debug else 0)
+        self.debug = debuglevel != 0
+        Domoticz.Debugging(debuglevel if self.debug else 0)
     
-            if self.debug:
-                DumpConfigToLog()
+        if self.debug:
+            DumpConfigToLog()
 
     def _read_parameters(self):
         self.main_valve_idxs = parseCSV_to_ints(Parameters.get("Mode1", ""))
