@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 # Author: ErwanBCN / RONELABS
-# Version: 1.4.1
+# Version: 1.5.0
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="1.4.1" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="1.5.0" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V1.4.1</h2><br/>
+        <h2>Automatic Irrigation System V1.5.0</h2><br/>
         Gestion automatique de 7 zones d'arrosage + 1 vanne générale.
     </description>
     <params>
@@ -46,6 +46,10 @@ UNIT_MANUAL_ZONE = 2
 MODE_OFF = 0
 MODE_AUTO = 10
 MODE_TEST = 20
+MODE_MANUAL = 30
+
+MANUAL_STOP_LEVEL = 10
+MANUAL_TIMEOUT_SECONDS = 60
 
 USERVAR_LAST_MODE = "Irrigation_LastStableMode"
 
@@ -62,9 +66,10 @@ class BasePlugin:
         self.mode = MODE_OFF
         self.run_active = False
         self.run_type = None
-        self.current_zone = 0          # auto/test: index 0..6 ; manual: zone 1..7
+        self.current_zone = 0
         self.zone_end_time = None
         self.last_auto_date = None
+        self.manual_mode_deadline = None
         self._device_state_cache = {}
 
     # ---------------------------------------------------------------------
@@ -80,25 +85,19 @@ class BasePlugin:
 
         Domoticz.Heartbeat(20)
 
-        # Sécurité absolue au démarrage.
         self._refresh_state_cache()
         self._all_valves_off()
 
-        # UserVariable : check/création au démarrage.
         self._ensure_last_mode_uservariable()
-
         self._restore_mode_from_device()
 
-        # Si Domoticz redémarre alors que le bouton était resté sur Test,
-        # on revient au dernier mode stable sauvegardé.
-        if self.mode == MODE_TEST:
+        if self.mode in (MODE_TEST, MODE_MANUAL):
             last = self._read_last_stable_mode(default=MODE_OFF)
-            Domoticz.Log(f"Startup found Test mode. Restoring last stable mode: {last}")
+            Domoticz.Log(f"Startup found temporary mode. Restoring last stable mode: {last}")
             self.mode = last
             self._update_selector(UNIT_MODE, last)
 
-        # Le manuel est toujours remis à zéro au démarrage.
-        self._update_selector(UNIT_MANUAL_ZONE, 0)
+        self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
 
         Domoticz.Log(f"RONELABS Irrigation started. Current mode={self.mode}")
 
@@ -119,7 +118,7 @@ class BasePlugin:
             return
 
         if Unit == UNIT_MANUAL_ZONE:
-            fallback = Devices[UNIT_MANUAL_ZONE].sValue if UNIT_MANUAL_ZONE in Devices else 0
+            fallback = Devices[UNIT_MANUAL_ZONE].sValue if UNIT_MANUAL_ZONE in Devices else MANUAL_STOP_LEVEL
             level = self._safe_level(Level, fallback)
             self._handle_manual_zone_command(level)
             return
@@ -127,7 +126,6 @@ class BasePlugin:
     def onHeartbeat(self):
         now = datetime.now()
 
-        # Check/création UserVariable à chaque heartbeat.
         self._ensure_last_mode_uservariable()
 
         if self.debug:
@@ -137,7 +135,6 @@ class BasePlugin:
                 f"type={self.run_type} zone={display_zone} end={self.zone_end_time}"
             )
 
-        # Départ auto seulement dans la fenêtre de l'heure prévue.
         if self.mode == MODE_AUTO and not self.run_active:
             if self._time_window_reached(now):
                 if self.last_auto_date != now.date():
@@ -149,19 +146,28 @@ class BasePlugin:
                 self._advance_sequence(now)
             elif self.run_type == "manual":
                 self.stop_sequence(reset_manual_selector=True)
+                self._restore_last_stable_mode()
+
+        if self.mode == MODE_MANUAL and not self.run_active and self.manual_mode_deadline:
+            if now >= self.manual_mode_deadline:
+                Domoticz.Log("Manual mode timeout: restoring previous stable mode")
+                self.manual_mode_deadline = None
+                self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
+                self._restore_last_stable_mode()
 
     # ---------------------------------------------------------------------
     # Mode commands
     # ---------------------------------------------------------------------
 
     def _handle_mode_command(self, level):
-        if level not in (MODE_OFF, MODE_AUTO, MODE_TEST):
+        if level not in (MODE_OFF, MODE_AUTO, MODE_TEST, MODE_MANUAL):
             level = MODE_OFF
 
         previous_mode = self.mode
 
         if level == MODE_OFF:
             self.mode = MODE_OFF
+            self.manual_mode_deadline = None
             self._write_last_stable_mode(MODE_OFF)
             self._update_selector(UNIT_MODE, MODE_OFF)
             self.stop_sequence(reset_manual_selector=True)
@@ -170,39 +176,65 @@ class BasePlugin:
 
         if level == MODE_AUTO:
             self.mode = MODE_AUTO
+            self.manual_mode_deadline = None
             self._write_last_stable_mode(MODE_AUTO)
             self._update_selector(UNIT_MODE, MODE_AUTO)
-            if self.run_type == "test":
+            if self.run_type in ("test", "manual"):
                 self.stop_sequence(reset_manual_selector=True)
             Domoticz.Log("Irrigation mode: Auto")
             return
 
         if level == MODE_TEST:
-            # Mémorise le dernier mode stable seulement si précédent Off ou Auto.
             if previous_mode in (MODE_OFF, MODE_AUTO):
                 self._write_last_stable_mode(previous_mode)
 
             self.mode = MODE_TEST
+            self.manual_mode_deadline = None
             self._update_selector(UNIT_MODE, MODE_TEST)
             Domoticz.Log("Irrigation mode: Test - starting 1 minute per zone")
             self.start_sequence("test")
             return
 
+        if level == MODE_MANUAL:
+            if previous_mode in (MODE_OFF, MODE_AUTO):
+                self._write_last_stable_mode(previous_mode)
+
+            self.mode = MODE_MANUAL
+            self._update_selector(UNIT_MODE, MODE_MANUAL)
+            self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
+            self.stop_sequence(reset_manual_selector=False, quiet=True)
+            self.manual_mode_deadline = datetime.now() + timedelta(seconds=MANUAL_TIMEOUT_SECONDS)
+            Domoticz.Log("Irrigation mode: Manual - waiting max 1 minute for zone selection")
+            return
+
     def _handle_manual_zone_command(self, level):
-        zone = int(level / 10) if level >= 10 else 0
+        if self.mode != MODE_MANUAL:
+            self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
+            return
 
-        if zone < 0 or zone > 7:
-            zone = 0
-
-        if zone == 0:
+        if level <= MANUAL_STOP_LEVEL:
             if self.run_type == "manual":
                 self.stop_sequence(reset_manual_selector=False)
-            self._update_selector(UNIT_MANUAL_ZONE, 0)
+            self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
+            self._restore_last_stable_mode()
+            return
+
+        # Off caché = 0
+        # Stop = 10
+        # Zone 1 = 20
+        # Zone 2 = 30
+        # ...
+        # Zone 7 = 80
+        zone = int(level / 10) - 1
+
+        if zone < 1 or zone > 7:
+            self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
             return
 
         if self.run_active:
-            self.stop_sequence(reset_manual_selector=False)
+            self.stop_sequence(reset_manual_selector=False, quiet=True)
 
+        self.manual_mode_deadline = None
         self.start_manual_zone(zone)
 
     # ---------------------------------------------------------------------
@@ -229,7 +261,7 @@ class BasePlugin:
     def start_manual_zone(self, zone):
         if zone < 1 or zone > 7 or len(self.zone_idxs) != 7:
             Domoticz.Error(f"Invalid manual zone: {zone}")
-            self._update_selector(UNIT_MANUAL_ZONE, 0)
+            self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
             return
 
         self.run_active = True
@@ -238,7 +270,7 @@ class BasePlugin:
         self.zone_end_time = datetime.now() + timedelta(minutes=1)
 
         self._open_only_zone(zone - 1)
-        self._update_selector(UNIT_MANUAL_ZONE, zone * 10)
+        self._update_selector(UNIT_MANUAL_ZONE, (zone + 1) * 10)
 
         Domoticz.Log(f"Manual irrigation: Zone {zone} On for max 1 minute")
 
@@ -268,10 +300,8 @@ class BasePlugin:
             self.stop_sequence(reset_manual_selector=True)
 
             if finished_type == "test":
-                last = self._read_last_stable_mode(default=MODE_OFF)
-                self.mode = last
-                self._update_selector(UNIT_MODE, last)
-                Domoticz.Log(f"Test finished. Restored previous mode: {last}")
+                self._restore_last_stable_mode()
+                Domoticz.Log("Test finished. Restored previous stable mode.")
             else:
                 Domoticz.Log(f"Irrigation {finished_type or ''}: sequence finished")
             return
@@ -287,7 +317,7 @@ class BasePlugin:
         self._all_valves_off()
 
         if reset_manual_selector:
-            self._update_selector(UNIT_MANUAL_ZONE, 0)
+            self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
 
         if not quiet:
             Domoticz.Log("Irrigation stopped: all valves Off")
@@ -297,12 +327,6 @@ class BasePlugin:
     # ---------------------------------------------------------------------
 
     def _open_only_zone(self, zone_index):
-        """
-        Anti-clignotement pompe :
-        - on garde la vanne générale ON si elle est déjà ON
-        - on ouvre la nouvelle zone
-        - puis on ferme les autres zones
-        """
         self._refresh_state_cache()
 
         for idx in self.main_valve_idxs:
@@ -406,7 +430,6 @@ class BasePlugin:
 
         Domoticz.Log(f"UserVariable missing: creating {USERVAR_LAST_MODE}=0")
 
-        # Type 2 = String, comme WANCONTROL.
         res = DomoticzAPI(
             f"type=command&param=adduservariable"
             f"&vname={USERVAR_LAST_MODE}"
@@ -476,6 +499,19 @@ class BasePlugin:
 
         return mode
 
+    def _restore_last_stable_mode(self):
+        last = self._read_last_stable_mode(default=MODE_OFF)
+
+        if last not in (MODE_OFF, MODE_AUTO):
+            last = MODE_OFF
+
+        self.mode = last
+        self.manual_mode_deadline = None
+        self._update_selector(UNIT_MODE, last)
+        self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
+
+        Domoticz.Log(f"Restored previous stable mode: {last}")
+
     # ---------------------------------------------------------------------
     # Setup helpers
     # ---------------------------------------------------------------------
@@ -517,14 +553,14 @@ class BasePlugin:
     def _create_devices(self):
         if UNIT_MODE not in Devices:
             options = {
-                "LevelActions": "|||",
-                "LevelNames": "Off|Auto|Test",
+                "LevelActions": "||||",
+                "LevelNames": "Off|Auto|Test|Manuel",
                 "LevelOffHidden": "false",
-                "SelectorStyle": "0",
+                "SelectorStyle": "1",
             }
             Domoticz.Device(
                 Unit=UNIT_MODE,
-                Name="Irrigation Mode",
+                Name="Irrigation Control",
                 TypeName="Selector Switch",
                 Switchtype=18,
                 Image=9,
@@ -534,10 +570,10 @@ class BasePlugin:
 
         if UNIT_MANUAL_ZONE not in Devices:
             options = {
-                "LevelActions": "||||||||",
-                "LevelNames": "0-Arret|Zone 1|Zone 2|Zone 3|Zone 4|Zone 5|Zone 6|Zone 7",
-                "LevelOffHidden": "false",
-                "SelectorStyle": "0",
+                "LevelActions": "|||||||||",
+                "LevelNames": "Off|Stop|Zone 1|Zone 2|Zone 3|Zone 4|Zone 5|Zone 6|Zone 7",
+                "LevelOffHidden": "true",
+                "SelectorStyle": "1",
             }
             Domoticz.Device(
                 Unit=UNIT_MANUAL_ZONE,
@@ -549,9 +585,8 @@ class BasePlugin:
                 Used=1,
             ).Create()
 
-        # Ne jamais forcer Auto ici.
         if UNIT_MANUAL_ZONE in Devices:
-            self._update_selector(UNIT_MANUAL_ZONE, 0)
+            self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
 
     def _restore_mode_from_device(self):
         try:
@@ -559,7 +594,7 @@ class BasePlugin:
         except Exception:
             saved = MODE_OFF
 
-        if saved not in (MODE_OFF, MODE_AUTO, MODE_TEST):
+        if saved not in (MODE_OFF, MODE_AUTO, MODE_TEST, MODE_MANUAL):
             saved = MODE_OFF
 
         self.mode = saved
@@ -569,10 +604,6 @@ class BasePlugin:
     # ---------------------------------------------------------------------
 
     def _time_window_reached(self, now):
-        """
-        Départ seulement dans une fenêtre de 60 secondes après l'heure prévue.
-        Évite qu'un reboot à 13h déclenche le cycle de 05h.
-        """
         try:
             hour, minute = [int(x) for x in self.start_time.split(":")]
             scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
