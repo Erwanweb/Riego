@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 
 # Author: ErwanBCN / RONELABS
-# Version: 2.0.1
+# Version: 2.1.1
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.0.1" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.1.1" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V2.0.1</h2><br/>
+        <h2>Automatic Irrigation System V2.1.1</h2><br/>
         Gestion automatique de 7 zones d'arrosage + 1 vanne générale.<br/>
-        V2 nettoyée : démarrage sécurisé Zigbee, Auto/Test/Manuel, Info texte, UserVariable.
+        V2 nettoyée : démarrage sécurisé Zigbee, Auto/Test/Manual, Info texte, UserVariable.
     </description>
     <params>
         <param field="Mode1" label="General Valve idx (ou CSV si plusieurs)" width="260px" required="true" default=""/>
@@ -58,6 +58,11 @@ STARTUP_SAFETY_SECONDS = 60
 
 USERVAR_LAST_MODE = "Irrigation_LastStableMode"
 
+MANUAL_ZONE_LEVELNAMES_UNLOCKED = "Stop|Zone 1|Zone 2|Zone 3|Zone 4|Zone 5|Zone 6|Zone 7"
+MANUAL_ZONE_LEVELACTIONS_UNLOCKED = "|||||||"
+MANUAL_ZONE_LEVELNAMES_LOCKED = "Stop"
+MANUAL_ZONE_LEVELACTIONS_LOCKED = ""
+
 
 class BasePlugin:
     def __init__(self):
@@ -83,11 +88,12 @@ class BasePlugin:
         self._device_state_cache = {}
 
     def onStart(self):
-        Domoticz.Log("RONELABS Irrigation V2.0.0: onStart called")
+        Domoticz.Log("RONELABS Irrigation V2.1.1: onStart called")
 
         self._setup_debug()
         self._read_parameters()
         self._create_devices()
+        self._sync_control_options()
 
         Domoticz.Heartbeat(20)
 
@@ -719,7 +725,7 @@ class BasePlugin:
         if UNIT_CONTROL not in Devices:
             options = {
                 "LevelActions": "||||",
-                "LevelNames": "Off|Auto|Test|Manuel",
+                "LevelNames": "Off|Auto|Test|Manual",
                 "LevelOffHidden": "false",
                 "SelectorStyle": "1",
             }
@@ -771,8 +777,68 @@ class BasePlugin:
 
         self.mode = saved
 
+    def _sync_control_options(self):
+        """
+        Force la mise à jour du libellé du sélecteur Control ("Manuel" -> "Manual")
+        sur un device déjà créé lors d'une version précédente du plugin.
+        """
+        if UNIT_CONTROL not in Devices:
+            return
+
+        levelnames = "Off|Auto|Test|Manual"
+        options = {
+            "LevelActions": "||||",
+            "LevelNames": levelnames,
+            "LevelOffHidden": "false",
+            "SelectorStyle": "1",
+        }
+
+        current_options = Devices[UNIT_CONTROL].Options or {}
+
+        if current_options.get("LevelNames") != levelnames:
+            Devices[UNIT_CONTROL].Update(
+                nValue=Devices[UNIT_CONTROL].nValue,
+                sValue=Devices[UNIT_CONTROL].sValue,
+                Options=options,
+            )
+            Domoticz.Log("Control selector labels updated to English (Manual)")
+
     def _set_manual_selector_stop(self):
-        self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
+        self._sync_manual_zone_options()
+
+    def _sync_manual_zone_options(self):
+        """
+        Remet le sélecteur "Manual Irrigation Zone" sur Stop, et affiche ou cache
+        les zones (Zone 1..7) selon que Control est en Manual ou non:
+        - mode == MANUAL : liste complète visible (Stop + 7 zones)
+        - sinon          : seul "Stop" est visible/sélectionnable
+        """
+        if UNIT_MANUAL_ZONE not in Devices:
+            return
+
+        unlocked = (self.mode == MODE_MANUAL)
+
+        levelnames = MANUAL_ZONE_LEVELNAMES_UNLOCKED if unlocked else MANUAL_ZONE_LEVELNAMES_LOCKED
+        levelactions = MANUAL_ZONE_LEVELACTIONS_UNLOCKED if unlocked else MANUAL_ZONE_LEVELACTIONS_LOCKED
+
+        options = {
+            "LevelActions": levelactions,
+            "LevelNames": levelnames,
+            "LevelOffHidden": "false",
+            "SelectorStyle": "1",
+        }
+
+        nvalue = 0
+        svalue = str(MANUAL_STOP_LEVEL)
+
+        current_options = Devices[UNIT_MANUAL_ZONE].Options or {}
+
+        if current_options.get("LevelNames") != levelnames:
+            Devices[UNIT_MANUAL_ZONE].Update(nValue=nvalue, sValue=svalue, Options=options)
+            if self.debug:
+                Domoticz.Debug(f"Manual zone selector options set to {'unlocked' if unlocked else 'locked'}")
+        elif Devices[UNIT_MANUAL_ZONE].nValue != nvalue or Devices[UNIT_MANUAL_ZONE].sValue != svalue:
+            Devices[UNIT_MANUAL_ZONE].Update(nValue=nvalue, sValue=svalue)
 
     def _delayed_set_manual_selector_stop(self, delay=1.5):
         """
@@ -783,7 +849,7 @@ class BasePlugin:
         """
         def _do():
             try:
-                self._update_selector(UNIT_MANUAL_ZONE, MANUAL_STOP_LEVEL)
+                self._sync_manual_zone_options()
                 if self.debug:
                     Domoticz.Debug("Manual selector force-reset to Stop (delayed)")
             except Exception as e:
