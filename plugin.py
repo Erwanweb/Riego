@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 # Author: ErwanBCN / RONELABS
-# Version: 2.3.0
+# Version: 2.3.1
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.3.0" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.3.1" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V2.3.0</h2><br/>
+        <h2>Automatic Irrigation System V2.3.1</h2><br/>
         Gestion automatique de 7 zones d'arrosage + 1 vanne générale.<br/>
         V2.2 : bouton unique Off/Auto/Test/Manual - Zone 1..7 (plus de second device manuel), démarrage sécurisé Zigbee, Info texte, UserVariable.
     </description>
@@ -103,7 +103,7 @@ class BasePlugin:
         self._device_state_cache = {}
 
     def onStart(self):
-        Domoticz.Log("RONELABS Irrigation V2.3.0: onStart called")
+        Domoticz.Log("RONELABS Irrigation V2.3.1: onStart called")
 
         self._setup_debug()
         self._read_parameters()
@@ -518,11 +518,15 @@ class BasePlugin:
             rem_zone = self._format_minutes_label(self._remaining_minutes(self.zone_end_time, now))
             prefix = str(self.run_type).upper()
 
+            percent_tag = ""
+            if self.run_type == "auto" and self.adjust_percent:
+                percent_tag = f"({self.adjust_percent}%) "
+
             if self.run_type == "manual":
                 text = f"{prefix} - ON Zone {self.current_zone} - ⏱️ {rem_zone}"
             else:
                 rem_total = self._format_minutes_label(self._remaining_total_minutes(now))
-                text = f"{prefix} - ON Zone {self.current_zone} - ⏱️ {rem_zone} - Total ⏱️ {rem_total}"
+                text = f"{prefix} - ON {percent_tag}Zone {self.current_zone} - ⏱️ {rem_zone} - Total ⏱️ {rem_total}"
 
         elif self.mode == MODE_TEST:
             text = "TEST - Waiting"
