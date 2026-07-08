@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 # Author: ErwanBCN / RONELABS
-# V2.2 : bouton unique Off/Auto/Test/Manual - Zone 1..7 (plus de second device manuel), démarrage sécurisé Zigbee, Info texte, UserVariable.
-# Version: 2.3.1
+#
+# Changelog:
+# V2.1.1 : Manual label (EN), Manual Zone selector locked/hidden when Control isn't Manual, fixed selector revert timing
+# V2.1.3 : parallel valve Off commands during startup safety (single summary log instead of one per valve)
+# V2.2.0 : merged "Manual Irrigation Zone" device into Control selector (Off/Auto/Test/Manual - Zone 1..7)
+# V2.2.1 : Info text uses "<1 min" instead of "0 min", uses ⏱️ / Total ⏱️ instead of Rem./Total Rem.
+# V2.2.2 : Manual mode no longer shows "Total" in Info text (single zone, not relevant)
+# V2.3.0 : new "Irrigation Adjust" device (Auto/70-120%) scaling Auto zone durations only
+# V2.3.1 : Info text shows the adjustment percentage for Auto (e.g. "AUTO - ON (70%) Zone 2 ...")
+# V2.3.2 : English plugin description, header cleanup
+# V2.3.3 : header changelog now tracks every version's changes (this entry)
+# V2.3.4 : retry once (after a short delay) when forcing valves Off fails, e.g. Domoticz API briefly unavailable during plugin restart
+#
+# Version: 2.3.4
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.3.1" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.3.4" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V2.3.1</h2><br/>
+        <h2>Automatic Irrigation System V2.3.4</h2><br/>
         Automatic management of 7 irrigation zones + 1 main valve.<br/>
     </description>
     <params>
@@ -29,6 +40,7 @@
 """
 
 import json
+import time
 import concurrent.futures
 import urllib.error
 import urllib.parse as parse
@@ -103,7 +115,7 @@ class BasePlugin:
         self._device_state_cache = {}
 
     def onStart(self):
-        Domoticz.Log("RONELABS Irrigation V2.3.1: onStart called")
+        Domoticz.Log("RONELABS Irrigation V2.3.4: onStart called")
 
         self._setup_debug()
         self._read_parameters()
@@ -400,16 +412,49 @@ class BasePlugin:
         for idx in self.main_valve_idxs:
             self._switch_idx_if_needed(idx, "Off")
 
-    def _force_all_valves_off(self, reason="force off"):
-        all_idxs = [idx for idx in (self.zone_idxs + self.main_valve_idxs) if idx]
+    def _force_all_valves_off(self, reason="force off", retries=1, retry_delay=2.0):
+        """
+        Envoie les commandes Off à toutes les vannes en parallèle. Si certaines
+        échouent (ex: API Domoticz momentanément indisponible pendant un
+        redémarrage du plugin), retente après un court délai avant d'abandonner.
+        """
+        remaining = [idx for idx in (self.zone_idxs + self.main_valve_idxs) if idx]
 
-        if not all_idxs:
+        if not remaining:
             return
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(all_idxs)) as executor:
+        attempt = 0
+
+        while remaining and attempt <= retries:
+            attempt += 1
+            results = self._send_valve_commands_parallel(remaining, "Off")
+
+            ok_idxs = [idx for idx in remaining if results.get(idx)]
+            still_failed = [idx for idx in remaining if not results.get(idx)]
+
+            if ok_idxs:
+                Domoticz.Log(f"{reason}: valves forced Off (parallel, attempt {attempt}) idx={ok_idxs}")
+
+            if still_failed and attempt <= retries:
+                Domoticz.Log(
+                    f"{reason}: {len(still_failed)} valve(s) failed idx={still_failed}, "
+                    f"retrying in {retry_delay:g}s (attempt {attempt + 1}/{retries + 1})"
+                )
+                time.sleep(retry_delay)
+
+            remaining = still_failed
+
+        if remaining:
+            Domoticz.Error(f"{reason}: failed to force Off idx={remaining} after {attempt} attempt(s)")
+
+    def _send_valve_commands_parallel(self, idxs, command):
+        if not idxs:
+            return {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(idxs)) as executor:
             future_to_idx = {
-                executor.submit(self._send_valve_command, idx, "Off"): idx
-                for idx in all_idxs
+                executor.submit(self._send_valve_command, idx, command): idx
+                for idx in idxs
             }
             results = {}
             for future in concurrent.futures.as_completed(future_to_idx):
@@ -418,16 +463,9 @@ class BasePlugin:
                     results[idx] = future.result()
                 except Exception as e:
                     results[idx] = False
-                    Domoticz.Error(f"{reason}: exception forcing valve idx={idx} Off: {e}")
+                    Domoticz.Error(f"Exception forcing valve idx={idx} {command}: {e}")
 
-        ok_idxs = [idx for idx in all_idxs if results.get(idx)]
-        failed_idxs = [idx for idx in all_idxs if not results.get(idx)]
-
-        if ok_idxs:
-            Domoticz.Log(f"{reason}: valves forced Off (parallel) idx={ok_idxs}")
-
-        if failed_idxs:
-            Domoticz.Error(f"{reason}: failed to force Off idx={failed_idxs}")
+        return results
 
     def _mark_all_valves_cached_off(self):
         for idx in self.zone_idxs + self.main_valve_idxs:
