@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 # Author: ErwanBCN / RONELABS
-# Version: 2.2.2
+# Version: 2.3.0
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.2.2" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.3.0" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V2.2.2</h2><br/>
+        <h2>Automatic Irrigation System V2.3.0</h2><br/>
         Gestion automatique de 7 zones d'arrosage + 1 vanne générale.<br/>
         V2.2 : bouton unique Off/Auto/Test/Manual - Zone 1..7 (plus de second device manuel), démarrage sécurisé Zigbee, Info texte, UserVariable.
     </description>
@@ -45,6 +45,7 @@ except ImportError:
 UNIT_CONTROL = 1
 UNIT_MANUAL_ZONE = 2  # ancien device (Manual Irrigation Zone), conservé seulement pour suppression
 UNIT_INFO = 3
+UNIT_ADJUST = 4
 
 MODE_OFF = 0
 MODE_AUTO = 10
@@ -63,6 +64,20 @@ USERVAR_LAST_MODE = "Irrigation_LastStableMode"
 CONTROL_LEVEL_NAMES = "Off|Auto|Test|" + "|".join(f"Manual - Zone {i + 1}" for i in range(7))
 CONTROL_LEVEL_ACTIONS = "|" * (len(CONTROL_LEVEL_NAMES.split("|")) - 1)
 
+# Irrigation Adjust: "Auto" = pas d'ajustement (réservé pour une future logique automatique),
+# puis un pourcentage appliqué à la durée de chaque zone, uniquement pour le cycle Auto.
+ADJUST_LEVEL_NAMES = "Auto|70%|80%|90%|100%|110%|120%"
+ADJUST_LEVEL_ACTIONS = "|" * (len(ADJUST_LEVEL_NAMES.split("|")) - 1)
+ADJUST_LEVEL_TO_PERCENT = {
+    0: None,   # "Auto" : aucun ajustement appliqué pour le moment
+    10: 70,
+    20: 80,
+    30: 90,
+    40: 100,
+    50: 110,
+    60: 120,
+}
+
 
 class BasePlugin:
     def __init__(self):
@@ -80,6 +95,7 @@ class BasePlugin:
         self.current_zone_index = None
         self.zone_end_time = None
         self.last_auto_date = None
+        self.adjust_percent = None  # None = "Auto" (pas d'ajustement pour le moment)
 
         self.startup_phase = False
         self.startup_end = None
@@ -87,7 +103,7 @@ class BasePlugin:
         self._device_state_cache = {}
 
     def onStart(self):
-        Domoticz.Log("RONELABS Irrigation V2.2.2: onStart called")
+        Domoticz.Log("RONELABS Irrigation V2.3.0: onStart called")
 
         self._setup_debug()
         self._read_parameters()
@@ -99,6 +115,7 @@ class BasePlugin:
 
         self._ensure_last_mode_uservariable()
         self._restore_mode_from_device()
+        self._restore_adjust_from_device()
 
         if self._is_transient_mode(self.mode):
             self._restore_last_stable_mode(update_info=False)
@@ -128,6 +145,13 @@ class BasePlugin:
 
         if Unit == UNIT_MANUAL_ZONE:
             Domoticz.Log("Command on legacy Manual Zone device ignored (device deprecated in V2.2.0)")
+            return
+
+        if Unit == UNIT_ADJUST:
+            fallback = Devices[UNIT_ADJUST].sValue if UNIT_ADJUST in Devices else 0
+            level = self._safe_level(Level, fallback)
+            self._handle_adjust_command(level)
+            self._update_info()
             return
 
         if Unit != UNIT_CONTROL:
@@ -298,6 +322,9 @@ class BasePlugin:
         duration = 1 if self.run_type == "test" else self.zone_minutes[self.current_zone_index]
         duration = max(0, float(duration))
 
+        if self.run_type == "auto" and self.adjust_percent:
+            duration = duration * (self.adjust_percent / 100.0)
+
         if duration <= 0:
             Domoticz.Log(f"Skipping zone {self.current_zone_index + 1}: duration is 0")
             self._advance_sequence(now)
@@ -308,9 +335,10 @@ class BasePlugin:
 
         self._open_only_zone(self.current_zone_index)
 
+        adjust_note = f" (adjusted {self.adjust_percent}%)" if self.run_type == "auto" and self.adjust_percent else ""
         Domoticz.Log(
             f"Irrigation {self.run_type}: Zone {self.current_zone} / idx={self.zone_idxs[self.current_zone_index]} "
-            f"On for {duration:g} minute(s)"
+            f"On for {duration:g} minute(s){adjust_note}"
         )
 
     def _advance_sequence(self, now):
@@ -541,9 +569,10 @@ class BasePlugin:
             return int(total)
 
         if self.run_type == "auto":
+            factor = (self.adjust_percent / 100.0) if self.adjust_percent else 1.0
             if self.current_zone_index is not None:
                 for i in range(self.current_zone_index + 1, 7):
-                    total += max(0, float(self.zone_minutes[i]))
+                    total += max(0, float(self.zone_minutes[i]) * factor)
             return int((total + 0.9999))
 
         return total
@@ -699,6 +728,24 @@ class BasePlugin:
                 Used=1,
             ).Create()
 
+        if UNIT_ADJUST not in Devices:
+            options = {
+                "LevelActions": ADJUST_LEVEL_ACTIONS,
+                "LevelNames": ADJUST_LEVEL_NAMES,
+                "LevelOffHidden": "false",
+                "SelectorStyle": "1",
+            }
+
+            Domoticz.Device(
+                Unit=UNIT_ADJUST,
+                Name="Irrigation Adjust",
+                TypeName="Selector Switch",
+                Switchtype=18,
+                Image=9,
+                Options=options,
+                Used=1,
+            ).Create()
+
     def _cleanup_legacy_manual_zone_device(self):
         if UNIT_MANUAL_ZONE in Devices:
             try:
@@ -722,6 +769,29 @@ class BasePlugin:
             saved = MODE_OFF
 
         self.mode = saved
+
+    def _restore_adjust_from_device(self):
+        try:
+            saved = int(Devices[UNIT_ADJUST].sValue) if UNIT_ADJUST in Devices else 0
+        except Exception:
+            saved = 0
+
+        if saved not in ADJUST_LEVEL_TO_PERCENT:
+            saved = 0
+
+        self.adjust_percent = ADJUST_LEVEL_TO_PERCENT[saved]
+
+    def _handle_adjust_command(self, level):
+        if level not in ADJUST_LEVEL_TO_PERCENT:
+            level = 0
+
+        self.adjust_percent = ADJUST_LEVEL_TO_PERCENT[level]
+        self._update_selector(UNIT_ADJUST, level)
+
+        if self.adjust_percent is None:
+            Domoticz.Log("Irrigation Adjust: Auto (no adjustment applied yet)")
+        else:
+            Domoticz.Log(f"Irrigation Adjust: {self.adjust_percent}% will be applied to Auto zone durations")
 
     def _sync_control_options(self):
         if UNIT_CONTROL not in Devices:
