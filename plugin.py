@@ -13,13 +13,14 @@
 # V2.3.2 : English plugin description, header cleanup
 # V2.3.3 : header changelog now tracks every version's changes (this entry)
 # V2.3.4 : retry once (after a short delay) when forcing valves Off fails, e.g. Domoticz API briefly unavailable during plugin restart
+# V2.3.5 : onStop uses a short timeout (3s) and no retry (Domoticz's own API is briefly unresponsive during a plugin restart; onStart's safety phase already re-closes everything, so retrying here only delays shutdown)
 #
-# Version: 2.3.4
+# Version: 2.3.5
 
 """
-<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.3.4" externallink="https://ronelabs.com">
+<plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.3.5" externallink="https://ronelabs.com">
     <description>
-        <h2>Automatic Irrigation System V2.3.4</h2><br/>
+        <h2>Automatic Irrigation System V2.3.5</h2><br/>
         Automatic management of 7 irrigation zones + 1 main valve.<br/>
     </description>
     <params>
@@ -115,7 +116,7 @@ class BasePlugin:
         self._device_state_cache = {}
 
     def onStart(self):
-        Domoticz.Log("RONELABS Irrigation V2.3.4: onStart called")
+        Domoticz.Log("RONELABS Irrigation V2.3.5: onStart called")
 
         self._setup_debug()
         self._read_parameters()
@@ -147,7 +148,13 @@ class BasePlugin:
 
     def onStop(self):
         Domoticz.Log("RONELABS Irrigation: onStop called")
-        self._force_all_valves_off(reason="plugin stop")
+        # Pendant un redémarrage du plugin, l'API Domoticz est souvent brièvement
+        # indisponible (Domoticz est occupé à traiter l'arrêt) : un timeout long ou
+        # des retries ici ne feraient que retarder l'arrêt pour rien, car onStart()
+        # relance systématiquement la phase de sécurité qui referme tout de toute façon.
+        # On tente donc un "best effort" rapide, utile surtout si le plugin est
+        # désactivé/supprimé (pas de onStart derrière pour rattraper le coup).
+        self._force_all_valves_off(reason="plugin stop", retries=0, retry_delay=0, timeout=3)
         Domoticz.Debugging(0)
 
     def onCommand(self, Unit, Command, Level, Color):
@@ -412,11 +419,14 @@ class BasePlugin:
         for idx in self.main_valve_idxs:
             self._switch_idx_if_needed(idx, "Off")
 
-    def _force_all_valves_off(self, reason="force off", retries=1, retry_delay=2.0):
+    def _force_all_valves_off(self, reason="force off", retries=1, retry_delay=2.0, timeout=10):
         """
         Envoie les commandes Off à toutes les vannes en parallèle. Si certaines
         échouent (ex: API Domoticz momentanément indisponible pendant un
         redémarrage du plugin), retente après un court délai avant d'abandonner.
+
+        timeout: délai HTTP par requête. À réduire (ex: onStop) pour ne pas
+        bloquer inutilement quand on sait que l'échec est probable/attendu.
         """
         remaining = [idx for idx in (self.zone_idxs + self.main_valve_idxs) if idx]
 
@@ -427,7 +437,7 @@ class BasePlugin:
 
         while remaining and attempt <= retries:
             attempt += 1
-            results = self._send_valve_commands_parallel(remaining, "Off")
+            results = self._send_valve_commands_parallel(remaining, "Off", timeout=timeout)
 
             ok_idxs = [idx for idx in remaining if results.get(idx)]
             still_failed = [idx for idx in remaining if not results.get(idx)]
@@ -447,13 +457,13 @@ class BasePlugin:
         if remaining:
             Domoticz.Error(f"{reason}: failed to force Off idx={remaining} after {attempt} attempt(s)")
 
-    def _send_valve_commands_parallel(self, idxs, command):
+    def _send_valve_commands_parallel(self, idxs, command, timeout=10):
         if not idxs:
             return {}
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(idxs)) as executor:
             future_to_idx = {
-                executor.submit(self._send_valve_command, idx, command): idx
+                executor.submit(self._send_valve_command, idx, command, timeout): idx
                 for idx in idxs
             }
             results = {}
@@ -472,11 +482,11 @@ class BasePlugin:
             if idx:
                 self._device_state_cache[idx] = "Off"
 
-    def _send_valve_command(self, idx, command):
+    def _send_valve_command(self, idx, command, timeout=10):
         if not idx:
             return False
 
-        res = DomoticzAPI(f"type=command&param=switchlight&idx={idx}&switchcmd={command}")
+        res = DomoticzAPI(f"type=command&param=switchlight&idx={idx}&switchcmd={command}", timeout=timeout)
         ok = bool(res) and str(res.get("status", "")).lower() == "ok"
 
         if ok:
@@ -892,14 +902,14 @@ class BasePlugin:
             Devices[unit].Update(nValue=nvalue, sValue=svalue)
 
 
-def DomoticzAPI(APICall):
+def DomoticzAPI(APICall, timeout=10):
     resultJson = None
     url = f"http://127.0.0.1:8080/json.htm?{parse.quote(APICall, safe='&=')}"
 
     try:
         Domoticz.Debug(f"Domoticz API request: {url}")
         req = request.Request(url)
-        response = request.urlopen(req, timeout=10)
+        response = request.urlopen(req, timeout=timeout)
 
         if response.status == 200:
             resultJson = json.loads(response.read().decode("utf-8"))
