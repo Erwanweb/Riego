@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 
 # Author: ErwanBCN / RONELABS
+# V2.2 : bouton unique Off/Auto/Test/Manual - Zone 1..7 (plus de second device manuel), démarrage sécurisé Zigbee, Info texte, UserVariable.
 # Version: 2.3.1
 
 """
 <plugin key="ZZ-AIS7Z" name="RONELABS - Auto Irrigation Sys" author="ErwanBCN" version="2.3.1" externallink="https://ronelabs.com">
     <description>
         <h2>Automatic Irrigation System V2.3.1</h2><br/>
-        Gestion automatique de 7 zones d'arrosage + 1 vanne générale.<br/>
-        V2.2 : bouton unique Off/Auto/Test/Manual - Zone 1..7 (plus de second device manuel), démarrage sécurisé Zigbee, Info texte, UserVariable.
+        Automatic management of 7 irrigation zones + 1 main valve.<br/>
     </description>
     <params>
         <param field="Mode1" label="General Valve idx (ou CSV si plusieurs)" width="260px" required="true" default=""/>
